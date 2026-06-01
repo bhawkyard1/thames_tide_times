@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from shapely.geometry import Point, LineString, MultiLineString
+from shapely.geometry import Point, LineString
 from shapely.ops import nearest_points
 from sqlmodel import Session, select, SQLModel
 
@@ -41,69 +41,49 @@ thames_path_path = Path(__file__).parent / "thames_path.json"
 thames_path = LineString(json.loads(thames_path_path.read_text()))
 
 
-@app.get("/closest_point_on_thames")
-def closest_point_on_thames(lat: float, lon: float) -> tuple[float, float]:
+@app.get("/get_tide_interp")
+def get_tide_interp(lat: float, lon: float) -> tuple[Station, Station, float]:
+    """Given a lat/lng point on our map, find the closest point on the thames, then from that point, the ids of the
+    two stations that our point lies between, and the interpolation between them."""
     point = Point(lat, lon)
-    nearest = nearest_points(point, thames_path)[1]
-    return nearest.x, nearest.y
+    nearest_on_thames = nearest_points(point, thames_path)[1]
+    interp = thames_path.line_locate_point(nearest_on_thames, normalized=True)
+    with Session(engine) as session:
+        prev_station = session.exec(
+            select(Station).where(Station.interp < interp).order_by(Station.interp.desc())
+        ).first()
+        next_station = session.exec(
+            select(Station).where(Station.interp > interp).order_by(Station.interp)
+        ).first()
+    return (
+        prev_station,
+        next_station,
+        (interp - prev_station.interp) / (next_station.interp - prev_station.interp),
+    )
 
 
 def initialize_db():
     SQLModel.metadata.create_all(engine)
 
-    all_stations = [
-        Station(
-            name="Richmond Lock",
-            station_id="0116",
-            latitude=51.46222,
-            longitude=-0.31722,
-        ),
-        Station(
-            name="Kew Bridge",
-            station_id="0115A",
-            latitude=51.486978,
-            longitude=-0.287419,
-        ),
-        Station(
-            name="Hammersmith Bridge",
-            station_id="0115",
-            latitude=51.462496,
-            longitude=-0.316761,
-        ),
-        Station(
-            name="Albert Bridge",
-            station_id="0114",
-            latitude=51.482364,
-            longitude=-0.166756,
-        ),
-        Station(
-            name="Chelsea Bridge",
-            station_id="0113A",
-            latitude=51.484548,
-            longitude=-0.149784,
-        ),
-        Station(
-            name="Tower Pier",
-            station_id="0113",
-            latitude=51.506684,
-            longitude=-0.079555,
-        ),
-        Station(
-            name="North Woolwich",
-            station_id="0112",
-            latitude=51.504687,
-            longitude=0.082693,
-        ),
-        Station(
-            name="Erith",
-            station_id="0111B",
-            latitude=51.484911,
-            longitude=0.186495,
-        ),
-    ]
-
     with Session(engine) as session:
-        for station in all_stations:
+        for name, station_id, lat, lon in ([
+            ["Richmond Lock", "0116", 51.46222, -0.31722],
+            ["Kew Bridge", "0115A", 51.486978, -0.287419],
+            ["Hammersmith Bridge", "0115", 51.462496, -0.316761],
+            ["Albert Bridge", "0114", 51.482364, -0.166756],
+            ["Chelsea Bridge", "0113A", 51.484548, -0.149784],
+            ["Tower Pier", "0113", 51.506684, -0.079555],
+            ["North Woolwich", "0112", 51.504687, 0.082693],
+            ["Erith", "0111B", 51.484911, 0.186495],
+        ]):
+            interp = thames_path.line_locate_point(Point(lat, lon), normalized=True)
+            station = Station(
+                name=name,
+                station_id=station_id,
+                latitude=lat,
+                longitude=lon,
+                interp=interp,
+            )
             statement = select(Station).where(Station.station_id == station.station_id)
             results = session.exec(statement)
             existing_station = results.one_or_none()

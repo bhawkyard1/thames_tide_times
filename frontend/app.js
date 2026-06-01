@@ -9,7 +9,6 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 map.locate({setView: true, maxZoom: 16});
 
 const tides_url = "http://localhost:8081";
-var popup_thames = L.popup();
 var acccircle = L.circle([0, 0], 0).addTo(map);
 
 async function onLocationFound(e) {
@@ -19,13 +18,9 @@ async function onLocationFound(e) {
         lat: e.latlng.lat,
         lon: e.latlng.lng
     });
-    const res = await fetch(`${tides_url}/closest_point_on_thames?${params}`);
+    const res = await fetch(`${tides_url}/get_tide_interp?${params}`);
     const data = await res.json();
-    const latlng = new L.LatLng(data[0], data[1])
-    popup_thames
-        .setLatLng(latlng)
-        .setContent("Closest point on thames at " + latlng.toString())
-        .openOn(map);
+    console.log(data);
 }
 
 map.on('locationfound', onLocationFound);

@@ -10,6 +10,8 @@ class Station(SQLModel, table=True):
     station_id: str = Field(unique=True, index=True)
     latitude: float
     longitude: float
+    interp: float
+    """0-1 value indicating how far along our thames path this station lies."""
     tide_events: list["TideEvent"] = Relationship(back_populates="station")
 
 
