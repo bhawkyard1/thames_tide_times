@@ -1,9 +1,12 @@
 import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import redis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from shapely.geometry import Point, LineString
 from shapely.ops import nearest_points
 from sqlmodel import Session, select, SQLModel
@@ -16,8 +19,10 @@ from thames_tide_times.models import Station
 async def lifespan(_: FastAPI):
     initialize_db()
     yield
+    red.close()
 
 
+red = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
@@ -41,10 +46,23 @@ thames_path_path = Path(__file__).parent / "thames_path.json"
 thames_path = LineString(json.loads(thames_path_path.read_text()))
 
 
+class StationInterp(BaseModel):
+    previous_station: Station
+    next_station: Station
+    interp: float
+
+
 @app.get("/get_tide_interp")
-def get_tide_interp(lat: float, lon: float) -> tuple[Station, Station, float]:
+def get_tide_interp(lat: float, lon: float) -> StationInterp:
     """Given a lat/lng point on our map, find the closest point on the thames, then from that point, the ids of the
     two stations that our point lies between, and the interpolation between them."""
+    redis_key = f"get_tide_interp:{lat=},{lon=}"
+    cached = red.get(redis_key)
+    if cached:
+        red.expire(redis_key, 60)
+        raw = json.loads(cached)
+        return StationInterp(**raw)
+
     point = Point(lat, lon)
     nearest_on_thames = nearest_points(point, thames_path)[1]
     interp = thames_path.line_locate_point(nearest_on_thames, normalized=True)
@@ -55,11 +73,14 @@ def get_tide_interp(lat: float, lon: float) -> tuple[Station, Station, float]:
         next_station = session.exec(
             select(Station).where(Station.interp > interp).order_by(Station.interp)
         ).first()
-    return (
-        prev_station,
-        next_station,
-        (interp - prev_station.interp) / (next_station.interp - prev_station.interp),
+    station_interp = StationInterp(
+        previous_station=prev_station,
+        next_station=next_station,
+        interp=(interp - prev_station.interp) / (next_station.interp - prev_station.interp),
     )
+    red.set(redis_key, station_interp.model_dump_json())
+    red.expire(redis_key, 60)
+    return station_interp
 
 
 def initialize_db():
