@@ -9,11 +9,18 @@ services:
     ports:
       - "8081:80"
     environment:
+      POSTGRES_USER: user
+      POSTGRES_DB: db
       REDIS_URL: redis://redis:6379
     depends_on:
       - redis
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
     secrets:
       - tidal_api_key
+      - postgres_pwd
 
   redis:
     image: redis
@@ -21,9 +28,31 @@ services:
       - redis_data:/data
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
 
+  db:
+    image: postgres:18
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_pwd
+      POSTGRES_DB: db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    secrets:
+      - postgres_pwd
+    volumes:
+      - db_data:/var/lib/postgresql
+    ports:
+      - "5432:5432"   # optional, for local access
+
 volumes:
   redis_data:
+  db_data:
 
 secrets:
   tidal_api_key:
     file: tidal_api_key
+  postgres_pwd:
+    file: postgres_pwd
