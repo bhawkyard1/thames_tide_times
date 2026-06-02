@@ -1,6 +1,8 @@
 from datetime import datetime
 from enum import Enum
+from typing import Self, Literal
 
+from pydantic import BaseModel
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -20,10 +22,26 @@ class TideType(str, Enum):
     LOW = "low"
 
 
+class _TideEventRaw(BaseModel):
+    EventType: Literal["HighWater", "LowWater"]
+    DateTime: datetime
+    Height: float
+
+
 class TideEvent(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     tide_type: TideType
     time: datetime
+    height: float
 
     station_id: int | None = Field(default=None, foreign_key="station.id")
     station: Station | None = Relationship(back_populates="tide_events")
+
+    @classmethod
+    def from_tides_api(cls, data: dict) -> Self:
+        raw = _TideEventRaw.model_validate(data)
+        return cls(
+            tide_type=TideType.HIGH if raw.EventType == "HighWater" else TideType.LOW,
+            time=raw.DateTime,
+            height=raw.Height,
+        )

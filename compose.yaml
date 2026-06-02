@@ -12,6 +12,8 @@ services:
       REDIS_URL: redis://redis:6379
     depends_on:
       - redis
+    secrets:
+      - tidal_api_key
 
   redis:
     image: redis
@@ -21,3 +23,7 @@ services:
 
 volumes:
   redis_data:
+
+secrets:
+  tidal_api_key:
+    file: tidal_api_key

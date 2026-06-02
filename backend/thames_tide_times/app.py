@@ -1,9 +1,11 @@
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 
 import redis
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,7 +14,7 @@ from shapely.ops import nearest_points
 from sqlmodel import Session, select, SQLModel
 
 from thames_tide_times.constants import engine
-from thames_tide_times.models import Station
+from thames_tide_times.models import Station, TideEvent
 
 
 @asynccontextmanager
@@ -23,6 +25,11 @@ async def lifespan(_: FastAPI):
 
 
 red = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+tide_prediction_max_diff_minutes = 120
+"""From time to time the predicted time of a tide event in the hydrographic API may change. If we are pulling tide 
+events from the API and putting them in our database and we encounter a tide in our database and a tide in the API 
+of the same type, with less than this number of minutes between them, we consider them the same tide and update the 
+existing one."""
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
@@ -44,6 +51,44 @@ def stations() -> list[Station]:
 
 thames_path_path = Path(__file__).parent / "thames_path.json"
 thames_path = LineString(json.loads(thames_path_path.read_text()))
+@app.post("/retrieve_tide_events")
+def retrieve_tide_events():
+    """Retrieve tide events from the uk hydrographic office api and put them in our database."""
+    with Session(engine) as session:
+        statement = select(Station)
+        for station in session.exec(statement).all():
+            url = f"https://admiraltyapi.azure-api.net/uktidalapi/api/V1/Stations/{station.station_id}/TidalEvents"
+            res = requests.get(
+                url,
+                params={
+                    "duration": 14,
+                    "subscription-key": Path("/run/secrets/tidal_api_key").read_text()
+                }
+            )
+            res.raise_for_status()
+            tide_events_new = [TideEvent.from_tides_api(item) for item in res.json()]
+
+            for tide_event_new in tide_events_new:
+                tide_statement = select(TideEvent).where(TideEvent.station_id == station.station_id)
+                existing_tide_event: TideEvent | None = None
+                for tide_event in session.exec(tide_statement).all():
+                    if tide_event.tide_type != tide_event_new.tide_type:
+                        continue
+                    earlier = min(tide_event.time, tide_event_new.time)
+                    later = max(tide_event.time, tide_event_new.time)
+                    if (later - earlier) < timedelta(minutes=tide_prediction_max_diff_minutes):
+                        existing_tide_event = tide_event
+                        existing_tide_event.time = tide_event_new.time
+                        existing_tide_event.height = tide_event_new.height
+                        break
+
+                if existing_tide_event is None:
+                    existing_tide_event = tide_event_new
+
+                session.add(existing_tide_event)
+
+        session.commit()
+
 
 
 class StationInterp(BaseModel):
