@@ -1,5 +1,12 @@
+import os
+from pathlib import Path
+
 from sqlmodel import create_engine
 
-_sqlite_file_name = "database.db"
-_sqlite_url = f"sqlite:///{_sqlite_file_name}"
-engine = create_engine(_sqlite_url, echo=True)
+_db_url = (
+    f"postgresql://"
+    f"{os.environ['POSTGRES_USER']}:"
+    f"{Path('/run/secrets/postgres_pwd').read_text()}"
+    f"@db:5432/{os.environ['POSTGRES_DB']}"
+)
+engine = create_engine(_db_url, echo=True)
