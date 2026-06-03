@@ -1,7 +1,8 @@
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import timedelta, datetime
 from pathlib import Path
 
 import redis
@@ -11,10 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from shapely.geometry import Point, LineString
 from shapely.ops import nearest_points
-from sqlmodel import Session, select, SQLModel
+from sqlalchemy import func
+from sqlmodel import Session, select, SQLModel, and_
 
 from thames_tide_times.constants import engine
-from thames_tide_times.models import Station, TideEvent
+from thames_tide_times.models import Station, TideEvent, TideType
 
 
 @asynccontextmanager
@@ -24,12 +26,11 @@ async def lifespan(_: FastAPI):
     red.close()
 
 
+logger = logging.getLogger("uvicorn.error")
 red = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
-tide_prediction_max_diff_minutes = 120
-"""From time to time the predicted time of a tide event in the hydrographic API may change. If we are pulling tide 
-events from the API and putting them in our database and we encounter a tide in our database and a tide in the API 
-of the same type, with less than this number of minutes between them, we consider them the same tide and update the 
-existing one."""
+
+thames_path_path = Path(__file__).parent / "thames_path.json"
+thames_path = LineString(json.loads(thames_path_path.read_text()))
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
@@ -49,83 +50,192 @@ def stations() -> list[Station]:
         return list(results)
 
 
-thames_path_path = Path(__file__).parent / "thames_path.json"
-thames_path = LineString(json.loads(thames_path_path.read_text()))
-@app.post("/retrieve_tide_events")
-def retrieve_tide_events():
-    """Retrieve tide events from the uk hydrographic office api and put them in our database."""
+def _retrieve_tide_events():
+    """Retrieve tide events from the uk hydrographic office api and put them in our database. Clean up old events with
+    a time of less than a day ago.
+    """
     with Session(engine) as session:
-        statement = select(Station)
-        for station in session.exec(statement).all():
+        for station in session.exec(select(Station)).all():
+            # We've still got tide events predictions in the future for this station?
+            # Skip it, avoid hitting the API again.
+            if station.tide_events and station.tide_events[-1].time > datetime.now():
+                continue
+
+            logger.info("Querying tide events from UKHO API...")
             url = f"https://admiraltyapi.azure-api.net/uktidalapi/api/V1/Stations/{station.station_id}/TidalEvents"
             res = requests.get(
                 url,
                 params={
-                    "duration": 14,
+                    "duration": 7,
                     "subscription-key": Path("/run/secrets/tidal_api_key").read_text()
                 }
             )
             res.raise_for_status()
-            tide_events_new = [TideEvent.from_tides_api(item) for item in res.json()]
+            tide_events_new = [TideEvent.from_tides_api(station=station, data=item) for item in res.json()]
+            session.add_all(tide_events_new)
 
-            for tide_event_new in tide_events_new:
-                tide_statement = select(TideEvent).where(TideEvent.station_id == station.station_id)
-                existing_tide_event: TideEvent | None = None
-                for tide_event in session.exec(tide_statement).all():
-                    if tide_event.tide_type != tide_event_new.tide_type:
-                        continue
-                    earlier = min(tide_event.time, tide_event_new.time)
-                    later = max(tide_event.time, tide_event_new.time)
-                    if (later - earlier) < timedelta(minutes=tide_prediction_max_diff_minutes):
-                        existing_tide_event = tide_event
-                        existing_tide_event.time = tide_event_new.time
-                        existing_tide_event.height = tide_event_new.height
-                        break
-
-                if existing_tide_event is None:
-                    existing_tide_event = tide_event_new
-
-                session.add(existing_tide_event)
+        # Delete old tide events, we don't care about these.
+        for tide_event in session.exec(
+                select(TideEvent).where(TideEvent.time < datetime.now() - timedelta(days=1))
+        ).all():
+            session.delete(tide_event)
 
         session.commit()
 
 
+def _next_tide_event(station: Station, tide_type: TideType | None = None) -> TideEvent:
+    if tide_type is None:
+        logger.info(f"Looking for next tide at {station.name}...")
+    else:
+        logger.info(f"Looking for next {tide_type} tide at {station.name}...")
 
-class StationInterp(BaseModel):
-    previous_station: Station
-    next_station: Station
-    interp: float
+    redis_key = f"next_tide_event:{station.id=},{tide_type=}"
+    cached = red.get(redis_key)
+    if cached:
+        return TideEvent.model_validate(json.loads(cached))
+
+    if tide_type is None:
+        conditions = TideEvent.station_id == station.id, TideEvent.time > datetime.now()
+    else:
+        conditions = TideEvent.station_id == station.id, TideEvent.tide_type == tide_type, TideEvent.time > datetime.now()
+    with Session(engine) as session:
+        event = session.exec(
+            select(TideEvent)
+            .where(
+                and_(*conditions)
+            )
+            .order_by(TideEvent.time)
+        ).first()
+        if not isinstance(event, TideEvent):
+            raise ValueError(
+                f"Could not find a future TideEvent at {station.name} after {datetime.now()}. Expected a TideEvent, "
+                f"got {event!r}. Is the tide event database being populated correctly?"
+            )
+
+    red.set(redis_key, event.model_dump_json())
+    logger.info(f"Setting expiry at {event.time}")
+    red.expireat(redis_key, event.time)
+    return event
 
 
-@app.get("/get_tide_interp")
-def get_tide_interp(lat: float, lon: float) -> StationInterp:
-    """Given a lat/lng point on our map, find the closest point on the thames, then from that point, the ids of the
-    two stations that our point lies between, and the interpolation between them."""
-    redis_key = f"get_tide_interp:{lat=},{lon=}"
+def _closest_tide_event(station: Station, time: datetime, event_type: TideType) -> TideEvent:
+    """Given a station id, a datetime, and a tide type, find the closest tide event at this station to `time`, of
+    `event_type`. This may be before or after `time`."""
+    logger.info(f"Looking for a {event_type} tide at {station.name} close to {time}...")
+    with Session(engine) as session:
+        diff = func.extract("epoch", TideEvent.time - time)
+        result = session.exec(
+            select(TideEvent)
+            .where(
+                and_(TideEvent.station_id == station.id, TideEvent.tide_type == event_type)
+            )
+            .order_by(func.abs(diff))
+            .limit(1)
+        ).one()
+    logger.info(f"Got {result.tide_type} tide at {result.time}")
+    return result
+
+
+class _LatLng(BaseModel):
+    latlng: tuple[float, float]
+
+
+@app.get("/closest_point_on_thames")
+def closest_point_on_thames(lat: float, lng: float) -> tuple[float, float]:
+    redis_key = f"closest_point_on_thames:{lat=},{lng=}"
     cached = red.get(redis_key)
     if cached:
         red.expire(redis_key, 60)
-        raw = json.loads(cached)
-        return StationInterp(**raw)
+        return _LatLng(latlng=json.loads(cached)).latlng
 
-    point = Point(lat, lon)
+    point = Point(lat, lng)
     nearest_on_thames = nearest_points(point, thames_path)[1]
+    red.set(redis_key, json.dumps((nearest_on_thames.x, nearest_on_thames.y)))
+    red.expire(redis_key, 60)
+    return point.x, point.y
+
+
+def _find_next_tide_pair(
+        station_a: Station,
+        station_b: Station,
+        tide_type: TideType | None = None
+) -> tuple[TideEvent, TideEvent]:
+    """We want to find matching tide events at two tide measuring stations and interpolate before them to arrive at
+    our prediction. Given two stations, a and b, and optionally a desired tide type, we'll query the next tide events
+    at each station. We will take the closest of the two, and find the closest tide event of the same type, at the
+    other station. This should return us two TideEvents that we can interpolate between.
+    """
+    a_next_event = _next_tide_event(station_a, tide_type)
+    b_next_event = _next_tide_event(station_b, tide_type)
+
+    if a_next_event.time < b_next_event.time:
+        b_matching_event = _closest_tide_event(
+            station=station_b,
+            time=a_next_event.time,
+            event_type=a_next_event.tide_type,
+        )
+        return a_next_event, b_matching_event
+    a_matching_event = _closest_tide_event(
+        station=station_b,
+        time=b_next_event.time,
+        event_type=b_next_event.tide_type,
+    )
+    return a_matching_event, b_next_event
+
+
+@app.get("/next_tide_events_from_position")
+def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideEvent, TideEvent]:
+    """Return the next two inflection points of the tide, at the closest point in the thames to lat/lng.
+    To do this, we:
+    * Given lat, lng representing our current position, find the closest location on the path of the thames.
+    * Find the thames tide station before our closest-thames-location, and the thames tide station after.
+    * Work the interpolation, that our closest-thames-location is at, relative to the previous and next
+    station, zero to one, zero being the previous station location, and one being the next station location.
+    * Using this value, interpolate the time of the next expected low tide and high tide.
+
+    The expected tide times are sourced from the uk hydrographic office api. This is trickier than it might first
+    appear, because we might encounter cases where a tide inflection has already occurred at one of our prev/next
+    tide stations, but not yet propagated to the other one, meaning we might not get values out of the hydrographic
+    API that we can safely interpolate between. The hydrographic office api doesn't let us query historical tide
+    event predictions, so we store these in our database.
+    """
+    redis_key = f"next_tide_event_from_position:{lat=},{lng=}"
+    cached = red.get(redis_key)
+    if cached:
+        red.expire(redis_key, 60)
+        return TideEvent.model_validate(json.loads(cached))
+
+    _retrieve_tide_events()
+
+    nearest_on_thames = Point(*closest_point_on_thames(lat, lng))
     interp = thames_path.line_locate_point(nearest_on_thames, normalized=True)
     with Session(engine) as session:
         prev_station = session.exec(
-            select(Station).where(Station.interp < interp).order_by(Station.interp.desc())
-        ).first()
+            select(Station)
+            .where(Station.interp < interp)
+            .order_by(Station.interp.desc())
+            .limit(1)
+        ).one()
         next_station = session.exec(
-            select(Station).where(Station.interp > interp).order_by(Station.interp)
-        ).first()
-    station_interp = StationInterp(
-        previous_station=prev_station,
-        next_station=next_station,
-        interp=(interp - prev_station.interp) / (next_station.interp - prev_station.interp),
+            select(Station)
+            .where(Station.interp > interp)
+            .order_by(Station.interp)
+            .limit(1)
+        ).one()
+
+    relative_interp = (interp - prev_station.interp) / (next_station.interp - prev_station.interp)
+
+    first_tides = _find_next_tide_pair(next_station, prev_station)
+    if first_tides[0].tide_type == TideType.HIGH:
+        second_tides_type = TideType.LOW
+    else:
+        second_tides_type = TideType.HIGH
+    second_tides = _find_next_tide_pair(prev_station, next_station, second_tides_type)
+
+    return (
+        TideEvent.lerp(first_tides[0], first_tides[1], relative_interp),
+        TideEvent.lerp(second_tides[0], second_tides[1], relative_interp),
     )
-    red.set(redis_key, station_interp.model_dump_json())
-    red.expire(redis_key, 60)
-    return station_interp
 
 
 def initialize_db():
@@ -162,3 +272,5 @@ def initialize_db():
             else:
                 session.add(station)
         session.commit()
+
+    _retrieve_tide_events()
