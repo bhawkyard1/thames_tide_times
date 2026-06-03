@@ -16,7 +16,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select, SQLModel, and_
 
 from thames_tide_times.constants import engine
-from thames_tide_times.models import Station, TideEvent, TideType
+from thames_tide_times.models import Station, TideEvent, TideType, TideData
 
 
 @asynccontextmanager
@@ -184,7 +184,7 @@ def _find_next_tide_pair(
 
 
 @app.get("/next_tide_events_from_position")
-def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideEvent, TideEvent]:
+def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideData, TideData]:
     """Return the next two inflection points of the tide, at the closest point in the thames to lat/lng.
     To do this, we:
     * Given lat, lng representing our current position, find the closest location on the path of the thames.
@@ -202,8 +202,8 @@ def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideEvent, T
     redis_key = f"next_tide_event_from_position:{lat=},{lng=}"
     cached = red.get(redis_key)
     if cached:
-        red.expire(redis_key, 60)
-        return TideEvent.model_validate(json.loads(cached))
+        loaded = json.loads(cached)
+        return TideData.model_validate(loaded[0]), TideData.model_validate(loaded[1])
 
     _retrieve_tide_events()
 
@@ -232,10 +232,13 @@ def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideEvent, T
         second_tides_type = TideType.HIGH
     second_tides = _find_next_tide_pair(prev_station, next_station, second_tides_type)
 
-    return (
-        TideEvent.lerp(first_tides[0], first_tides[1], relative_interp),
-        TideEvent.lerp(second_tides[0], second_tides[1], relative_interp),
-    )
+    first_tide_interp = TideEvent.lerp(first_tides[0], first_tides[1], relative_interp)
+    second_tide_interp = TideEvent.lerp(second_tides[0], second_tides[1], relative_interp)
+
+    red.set(redis_key, f"[{first_tide_interp.model_dump_json()},{second_tide_interp.model_dump_json()}]")
+    red.expireat(redis_key, min(first_tide_interp.time, second_tide_interp.time))
+
+    return first_tide_interp, second_tide_interp
 
 
 def initialize_db():

@@ -34,11 +34,24 @@ class _TideEventRaw(BaseModel):
     Height: float
 
 
-class TideEvent(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
+class TideData(BaseModel):
     tide_type: TideType
     time: datetime
     height: float
+
+    @classmethod
+    def lerp(cls, event_1: Self, event_2: Self, interp: float) -> "TideData":
+        if event_1.tide_type != event_2.tide_type:
+            raise ValueError(f"Cannot interpolate between {event_1} and {event_2} as they have different tide_types!")
+        return cls(
+            tide_type=event_1.tide_type,
+            time=event_1.time + (event_2.time - event_1.time) * interp,
+            height=event_1.height + (event_2.height - event_1.height) * interp,
+        )
+
+
+class TideEvent(TideData, SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
 
     station_id: int = Field(default=None, foreign_key="station.id")
     station: Station = Relationship(back_populates="tide_events")
@@ -53,12 +66,4 @@ class TideEvent(SQLModel, table=True):
             station_id=station.id,
         )
 
-    @classmethod
-    def lerp(cls, event_1: Self, event_2: Self, interp: float) -> Self:
-        if event_1.tide_type != event_2.tide_type:
-            raise ValueError(f"Cannot interpolate between {event_1} and {event_2} as they have different tide_types!")
-        return cls(
-            tide_type=event_1.tide_type,
-            time=event_1.time + (event_2.time - event_1.time) * interp,
-            height=event_1.height + (event_2.height - event_1.height) * interp,
-        )
+
