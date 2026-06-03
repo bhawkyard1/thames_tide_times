@@ -9,7 +9,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 map.locate({setView: true, maxZoom: 16});
 
 const tides_url = "http://localhost:8081";
-var acccircle = L.circle([0, 0], 0).addTo(map);
+var acc_circle = L.circle([0, 0], 0).addTo(map);
 var tide_popup = L.popup();
 
 
@@ -35,17 +35,15 @@ function formatTidePrediction(tide_data) {
     const tide_date = new Date(`${tide_data["time"]}`);
     const tide_height = Number(tide_data["height"]).toFixed(1);
     return capitalizeFirstLetter(
-        `${tide_data["tide_type"]} tide expected at ${tide_date.toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"})} (${tide_height} meters).`
+        `${tide_data["tide_type"]} tide expected at ${tide_date.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit"
+        })} (${tide_height} meters).`
     );
 }
 
 async function onLocationFound(e) {
-    acccircle.setRadius(e.accuracy).setLatLng(e.latlng);
-
-    const params = new URLSearchParams({
-        lat: e.latlng.lat,
-        lng: e.latlng.lng
-    });
+    acc_circle.setRadius(e.accuracy).setLatLng(e.latlng);
 
     const res = await fetch(`${tides_url}/next_tide_events_from_position?${params}`);
     const tide_data = await res.json();
