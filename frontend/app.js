@@ -11,6 +11,7 @@ map.locate({setView: true, maxZoom: 16});
 const tides_url = "http://localhost:8081";
 var acc_circle = L.circle([0, 0], 0).addTo(map);
 var tide_popup = L.popup();
+var custom_location = false;
 
 
 function formatTideDirection(tide_data) {
@@ -42,12 +43,14 @@ function formatTidePrediction(tide_data) {
     );
 }
 
-async function onLocationFound(e) {
-    acc_circle.setRadius(e.accuracy).setLatLng(e.latlng);
+async function showTideEvents(latlng) {
+    const params = new URLSearchParams({
+        lat: latlng.lat,
+        lng: latlng.lng
+    });
 
     const res = await fetch(`${tides_url}/next_tide_events_from_position?${params}`);
     const tide_data = await res.json();
-    console.log(tide_data);
 
     const res_thames_point = await fetch(`${tides_url}/closest_point_on_thames?${params}`);
     const data_thames_point = await res_thames_point.json();
@@ -58,6 +61,16 @@ async function onLocationFound(e) {
     ).openOn(map);
 }
 
+async function onLocationFound(e) {
+    acc_circle.setRadius(e.accuracy).setLatLng(e.latlng);
+
+    console.log(`custom_location: ${custom_location}, tide_popup.isOpen() ${tide_popup.isOpen()}`)
+    if (!custom_location || !tide_popup.isOpen()) {
+        custom_location = false;
+        await showTideEvents(e.latlng);
+    }
+}
+
 map.on('locationfound', onLocationFound);
 
 function onLocationError(e) {
@@ -65,6 +78,13 @@ function onLocationError(e) {
 }
 
 map.on('locationerror', onLocationError);
+
+async function onMapClick(e) {
+    custom_location = true;
+    await showTideEvents(e.latlng);
+}
+
+map.on('click', onMapClick);
 
 async function showStations() {
     const res = await fetch(`${tides_url}/stations`);
