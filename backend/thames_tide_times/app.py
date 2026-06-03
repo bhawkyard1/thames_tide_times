@@ -183,6 +183,16 @@ def _find_next_tide_pair(
     return a_matching_event, b_next_event
 
 
+@app.get("/next_tide_events_at_station")
+def next_tide_events_at_station(station_id: int) -> tuple[TideEvent, TideEvent]:
+    with Session(engine) as session:
+        station = session.exec(select(Station).where(Station.id == station_id)).one()
+    next_tide = _next_tide_event(station)
+    if next_tide.tide_type == TideType.HIGH:
+        return next_tide, _next_tide_event(station, TideType.LOW)
+    return next_tide, _next_tide_event(station, TideType.HIGH)
+
+
 @app.get("/next_tide_events_from_position")
 def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideData, TideData]:
     """Return the next two inflection points of the tide, at the closest point in the thames to lat/lng.
