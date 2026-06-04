@@ -194,7 +194,7 @@ def _find_next_tide_pair(
         return a_next_event, b_matching_event
     logger.info(f"{b_next_event} sooner, looking for closest {b_next_event.tide_type} at {station_a.name}")
     a_matching_event = _closest_tide_event(
-        station=station_b,
+        station=station_a,
         time=b_next_event.time,
         event_type=b_next_event.tide_type,
     )
