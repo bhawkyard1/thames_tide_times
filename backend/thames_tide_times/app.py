@@ -255,7 +255,7 @@ def next_tide_events_from_position(lat: float, lng: float, request: Request) -> 
 
     relative_interp = (interp - prev_station.interp) / (next_station.interp - prev_station.interp)
 
-    first_tides = _find_next_tide_pair(next_station, prev_station)
+    first_tides = _find_next_tide_pair(prev_station, next_station)
     if first_tides[0].tide_type == TideType.HIGH:
         second_tides_type = TideType.LOW
     else:
