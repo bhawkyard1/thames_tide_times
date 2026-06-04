@@ -7,11 +7,14 @@ from pathlib import Path
 
 import redis
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from shapely.geometry import Point, LineString
 from shapely.ops import nearest_points
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func
 from sqlmodel import Session, select, SQLModel, and_
 
@@ -31,7 +34,11 @@ red = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 
 thames_path_path = Path(__file__).parent / "thames_path.json"
 thames_path = LineString(json.loads(thames_path_path.read_text()))
+
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,7 +49,8 @@ app.add_middleware(
 
 
 @app.get("/stations")
-def stations() -> list[Station]:
+@limiter.limit("10/minute")
+def stations(request: Request) -> list[Station]:
     """Return all tide measuring stations."""
     with Session(engine) as session:
         statement = select(Station)
@@ -140,8 +148,7 @@ class _LatLng(BaseModel):
     latlng: tuple[float, float]
 
 
-@app.get("/closest_point_on_thames")
-def closest_point_on_thames(lat: float, lng: float) -> tuple[float, float]:
+def _closest_point_on_thames(lat: float, lng: float):
     redis_key = f"closest_point_on_thames:{lat=},{lng=}"
     cached = red.get(redis_key)
     if cached:
@@ -153,6 +160,12 @@ def closest_point_on_thames(lat: float, lng: float) -> tuple[float, float]:
     red.set(redis_key, json.dumps((nearest_on_thames.x, nearest_on_thames.y)))
     red.expire(redis_key, 60)
     return point.x, point.y
+
+
+@app.get("/closest_point_on_thames")
+@limiter.limit("100/minute")
+def closest_point_on_thames(lat: float, lng: float, request: Request) -> tuple[float, float]:
+    return _closest_point_on_thames(lat, lng)
 
 
 def _find_next_tide_pair(
@@ -184,7 +197,8 @@ def _find_next_tide_pair(
 
 
 @app.get("/next_tide_events_at_station")
-def next_tide_events_at_station(station_id: int) -> tuple[TideEvent, TideEvent]:
+@limiter.limit("10/minute")
+def next_tide_events_at_station(station_id: int, request: Request) -> tuple[TideEvent, TideEvent]:
     with Session(engine) as session:
         station = session.exec(select(Station).where(Station.id == station_id)).one()
     next_tide = _next_tide_event(station)
@@ -194,7 +208,8 @@ def next_tide_events_at_station(station_id: int) -> tuple[TideEvent, TideEvent]:
 
 
 @app.get("/next_tide_events_from_position")
-def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideData, TideData]:
+@limiter.limit("50/minute")
+def next_tide_events_from_position(lat: float, lng: float, request: Request) -> tuple[TideData, TideData]:
     """Return the next two inflection points of the tide, at the closest point in the thames to lat/lng.
     To do this, we:
     * Given lat, lng representing our current position, find the closest location on the path of the thames.
@@ -217,7 +232,7 @@ def next_tide_events_from_position(lat: float, lng: float) -> tuple[TideData, Ti
 
     _retrieve_tide_events()
 
-    nearest_on_thames = Point(*closest_point_on_thames(lat, lng))
+    nearest_on_thames = Point(*_closest_point_on_thames(lat, lng))
     interp = thames_path.line_locate_point(nearest_on_thames, normalized=True)
     with Session(engine) as session:
         prev_station = session.exec(
