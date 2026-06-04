@@ -93,14 +93,16 @@ def _retrieve_tide_events():
 
 def _next_tide_event(station: Station, tide_type: TideType | None = None) -> TideEvent:
     if tide_type is None:
-        logger.info(f"Looking for next tide at {station.name}...")
+        logger.info(f"Looking for next tide at {station.name}")
     else:
-        logger.info(f"Looking for next {tide_type} tide at {station.name}...")
+        logger.info(f"Looking for next {tide_type} tide at {station.name}")
 
     redis_key = f"next_tide_event:{station.id=},{tide_type=}"
     cached = red.get(redis_key)
     if cached:
-        return TideEvent.model_validate(json.loads(cached))
+        result = TideEvent.model_validate(json.loads(cached))
+        logger.info(f"Found cached {result}")
+        return result
 
     if tide_type is None:
         conditions = TideEvent.station_id == station.id, TideEvent.time > datetime.now()
@@ -121,6 +123,7 @@ def _next_tide_event(station: Station, tide_type: TideType | None = None) -> Tid
             )
 
     red.set(redis_key, event.model_dump_json())
+    logger.info(f"Found {event}")
     logger.info(f"Setting expiry at {event.time}")
     red.expireat(redis_key, event.time)
     return event
@@ -182,14 +185,16 @@ def _find_next_tide_pair(
     b_next_event = _next_tide_event(station_b, tide_type)
 
     if a_next_event.time < b_next_event.time:
+        logger.info(f"{a_next_event} sooner, looking for closest {a_next_event.tide_type} at {station_b.name}")
         b_matching_event = _closest_tide_event(
             station=station_b,
             time=a_next_event.time,
             event_type=a_next_event.tide_type,
         )
         return a_next_event, b_matching_event
+    logger.info(f"{b_next_event} sooner, looking for closest {b_next_event.tide_type} at {station_a.name}")
     a_matching_event = _closest_tide_event(
-        station=station_b,
+        station=station_a,
         time=b_next_event.time,
         event_type=b_next_event.tide_type,
     )
@@ -250,7 +255,7 @@ def next_tide_events_from_position(lat: float, lng: float, request: Request) -> 
 
     relative_interp = (interp - prev_station.interp) / (next_station.interp - prev_station.interp)
 
-    first_tides = _find_next_tide_pair(next_station, prev_station)
+    first_tides = _find_next_tide_pair(prev_station, next_station)
     if first_tides[0].tide_type == TideType.HIGH:
         second_tides_type = TideType.LOW
     else:
