@@ -8,7 +8,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 
 map.locate({setView: true, maxZoom: 16});
 
-const tides_url = "http://localhost:8081";
+const tides_url = "/api";
 var acc_circle = L.circle([0, 0], 0).addTo(map);
 var tide_popup = L.popup();
 var custom_location = false;
