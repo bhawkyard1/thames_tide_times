@@ -75,7 +75,7 @@ def _retrieve_tide_events():
                 url,
                 params={
                     "duration": 7,
-                    "subscription-key": Path("/run/secrets/tidal_api_key").read_text()
+                    "subscription-key": Path("/run/secrets/tidal_api_key").read_text().strip()
                 }
             )
             res.raise_for_status()
