@@ -1,0 +1,22 @@
+name: Backend Integration Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create dummy files
+        run: |
+          echo "test" > postgres_pwd
+          echo "dummy" > tidal_api_key
+          echo "{}" > backend/thames_tide_times/thames_path.json
+
+      - name: Run integration tests
+        run: |
+          ./run_tests backend integration

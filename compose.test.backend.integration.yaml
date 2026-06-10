@@ -1,0 +1,38 @@
+services:
+  backend:
+    build:
+      context: backend
+      target: test
+    command: ${TEST_ARGS:-}
+    expose:
+      - "80"
+    ports:
+      - "8080:80"
+    environment:
+      TESTING: "true"
+      POSTGRES_PASSWORD: test
+    secrets: []
+
+  frontend:
+    profiles:
+      - "ui"
+
+  nginx:
+    profiles:
+      - "ui"
+
+  redis:
+    volumes:
+      - /data
+
+  db:
+    environment:
+      POSTGRES_PASSWORD: test
+      POSTGRES_PASSWORD_FILE: ~
+    secrets: []
+    volumes:
+      - /var/lib/postgresql
+
+secrets:
+  tidal_api_key: ~
+  postgres_pwd: ~
