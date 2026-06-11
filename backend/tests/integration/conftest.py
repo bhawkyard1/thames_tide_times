@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import sys
+from typing import Callable
 from unittest import mock
 
 sys.path.append("/code")
@@ -25,6 +26,14 @@ def mock_ukho_tide_events():
 def client(mock_ukho_tide_events):
     with TestClient(app.app) as client:
         yield client
+
+
+@pytest.fixture(scope="session")
+def mock_now():
+    with mock.patch("thames_tide_times.app.datetime") as mock_datetime:
+        mock_datetime.now.return_value = datetime(2000, 1, 1, 0, 0, 0, 0)  # Happy new year!
+        mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        yield mock_datetime.now
 
 
 @pytest.fixture(scope="session")
@@ -71,19 +80,24 @@ def mock_stations(mock_thames_path):
 
 
 @pytest.fixture(scope="session")
-def mock_tide_events(mock_stations: list[Station]):
+def mock_tide_events(mock_stations: list[Station], mock_now: Callable[[], datetime]):
     with Session(engine) as session:
         for station in session.exec(select(TideEvent)):
             session.delete(station)
 
         events = []
         westminster, greenwich, erith = mock_stations
-        now = datetime.now()
+        now = mock_now()
         for type_, time, height, station_id in ([
             [TideType.HIGH, now - timedelta(hours=1), 8, westminster.id],
             [TideType.LOW, now + timedelta(hours=11), 0, westminster.id],
             [TideType.HIGH, now + timedelta(hours=23), 7, westminster.id],
             [TideType.LOW, now + timedelta(hours=35), 1, westminster.id],
+            # Greenwich tides are an hour later and a meter higher
+            [TideType.HIGH, now, 9, greenwich.id],
+            [TideType.LOW, now + timedelta(hours=10), 1, greenwich.id],
+            [TideType.HIGH, now + timedelta(hours=22), 8, greenwich.id],
+            [TideType.LOW, now + timedelta(hours=34), 2, greenwich.id],
         ]):
             event = TideEvent(
                 tide_type=type_,
