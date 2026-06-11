@@ -168,7 +168,7 @@ def _closest_point_on_thames(lat: float, lng: float):
     nearest_on_thames = nearest_points(point, thames_path)[1]
     red.set(redis_key, json.dumps((nearest_on_thames.x, nearest_on_thames.y)))
     red.expire(redis_key, 60)
-    return point.x, point.y
+    return nearest_on_thames.x, nearest_on_thames.y
 
 
 @app.get("/closest_point_on_thames")

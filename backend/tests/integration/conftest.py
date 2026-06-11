@@ -1,10 +1,9 @@
 import sys
 from unittest import mock
 
-from starlette.testclient import TestClient
-
 sys.path.append("/code")
 
+from fastapi.testclient import TestClient
 import pytest
 
 from shapely import LineString, Point
