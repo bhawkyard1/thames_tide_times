@@ -58,6 +58,20 @@ def stations(request: Request) -> list[Station]:
         return list(results)
 
 
+def _get_ukho_tide_events(station: Station) -> list[dict]:
+    """For a given station, retrieve the relevant tide events from the UKHO api."""
+    url = f"https://admiraltyapi.azure-api.net/uktidalapi/api/V1/Stations/{station.station_id}/TidalEvents"
+    res = requests.get(
+        url,
+        params={
+            "duration": 7,
+            "subscription-key": Path("/run/secrets/tidal_api_key").read_text().strip()
+        }
+    )
+    res.raise_for_status()
+    return res.json()
+
+
 def _retrieve_tide_events():
     """Retrieve tide events from the uk hydrographic office api and put them in our database. Clean up old events with
     a time of less than a day ago.
@@ -70,16 +84,8 @@ def _retrieve_tide_events():
                 continue
 
             logger.info("Querying tide events from UKHO API...")
-            url = f"https://admiraltyapi.azure-api.net/uktidalapi/api/V1/Stations/{station.station_id}/TidalEvents"
-            res = requests.get(
-                url,
-                params={
-                    "duration": 7,
-                    "subscription-key": Path("/run/secrets/tidal_api_key").read_text().strip()
-                }
-            )
-            res.raise_for_status()
-            tide_events_new = [TideEvent.from_tides_api(station=station, data=item) for item in res.json()]
+            data = _get_ukho_tide_events(station)
+            tide_events_new = [TideEvent.from_tides_api(station=station, data=item) for item in data]
             session.add_all(tide_events_new)
 
         # Delete old tide events, we don't care about these.
@@ -162,7 +168,7 @@ def _closest_point_on_thames(lat: float, lng: float):
     nearest_on_thames = nearest_points(point, thames_path)[1]
     red.set(redis_key, json.dumps((nearest_on_thames.x, nearest_on_thames.y)))
     red.expire(redis_key, 60)
-    return point.x, point.y
+    return nearest_on_thames.x, nearest_on_thames.y
 
 
 @app.get("/closest_point_on_thames")

@@ -7,7 +7,9 @@ services:
       - "80"
 
   backend:
-    build: backend
+    build:
+      context: backend
+      target: production
     environment:
       POSTGRES_USER: user
       POSTGRES_DB: db
