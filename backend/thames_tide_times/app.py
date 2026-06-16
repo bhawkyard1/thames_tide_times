@@ -4,6 +4,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import timedelta, datetime
 from pathlib import Path
+from typing import Any, AsyncGenerator
 
 import redis
 import requests
@@ -15,15 +16,15 @@ from shapely.ops import nearest_points
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy import func
-from sqlmodel import Session, select, SQLModel, and_
+from sqlalchemy import ColumnElement, func
+from sqlmodel import Session, select, SQLModel, and_, col
 
 from thames_tide_times.constants import engine
 from thames_tide_times.models import Station, TideEvent, TideType, TideData
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     initialize_db()
     yield
     red.close()
@@ -38,7 +39,10 @@ thames_path = LineString(json.loads(thames_path_path.read_text()))
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(
+    RateLimitExceeded,
+    _rate_limit_exceeded_handler,  # type: ignore[arg-type]
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,21 +62,30 @@ def stations(request: Request) -> list[Station]:
         return list(results)
 
 
-def _get_ukho_tide_events(station: Station) -> list[dict]:
+def _guard_json(json_data: Any) -> list[dict[Any, Any]]:
+    if not isinstance(json_data, list):
+        raise TypeError(f"Expected a list, got {type(json_data)}!")
+    for i, item in enumerate(json_data):
+        if not isinstance(item, dict):
+            raise TypeError(f"Expected a dict, got {type(item)} at index {i}!")
+    return json_data
+
+
+def _get_ukho_tide_events(station: Station) -> list[dict[Any, Any]]:
     """For a given station, retrieve the relevant tide events from the UKHO api."""
     url = f"https://admiraltyapi.azure-api.net/uktidalapi/api/V1/Stations/{station.station_id}/TidalEvents"
     res = requests.get(
         url,
         params={
-            "duration": 7,
-            "subscription-key": Path("/run/secrets/tidal_api_key").read_text().strip()
+            "duration": "7",
+            "subscription-key": Path("/run/secrets/tidal_api_key").read_text().strip(),
         }
     )
     res.raise_for_status()
-    return res.json()
+    return _guard_json(res.json())
 
 
-def _retrieve_tide_events():
+def _retrieve_tide_events() -> None:
     """Retrieve tide events from the uk hydrographic office api and put them in our database. Clean up old events with
     a time of less than a day ago.
     """
@@ -110,17 +123,22 @@ def _next_tide_event(station: Station, tide_type: TideType | None = None) -> Tid
         logger.info(f"Found cached {result}")
         return result
 
+    conditions: tuple[ColumnElement[bool], ...]
     if tide_type is None:
-        conditions = TideEvent.station_id == station.id, TideEvent.time > datetime.now()
+        conditions = col(TideEvent.station_id) == station.id, col(TideEvent.time) > datetime.now()
     else:
-        conditions = TideEvent.station_id == station.id, TideEvent.tide_type == tide_type, TideEvent.time > datetime.now()
+        conditions = (
+            col(TideEvent.station_id) == station.id,
+            col(TideEvent.tide_type) == tide_type,
+            col(TideEvent.time) > datetime.now()
+        )
     with Session(engine) as session:
         event = session.exec(
             select(TideEvent)
             .where(
                 and_(*conditions)
             )
-            .order_by(TideEvent.time)
+            .order_by(col(TideEvent.time))
         ).first()
         if not isinstance(event, TideEvent):
             raise ValueError(
@@ -140,7 +158,7 @@ def _closest_tide_event(station: Station, time: datetime, event_type: TideType) 
     `event_type`. This may be before or after `time`."""
     logger.info(f"Looking for a {event_type} tide at {station.name} close to {time}...")
     with Session(engine) as session:
-        diff = func.extract("epoch", TideEvent.time - time)
+        diff = func.extract("epoch", col(TideEvent.time) - time)
         result = session.exec(
             select(TideEvent)
             .where(
@@ -157,7 +175,7 @@ class _LatLng(BaseModel):
     latlng: tuple[float, float]
 
 
-def _closest_point_on_thames(lat: float, lng: float):
+def _closest_point_on_thames(lat: float, lng: float) -> tuple[float, float]:
     redis_key = f"closest_point_on_thames:{lat=},{lng=}"
     cached = red.get(redis_key)
     if cached:
@@ -249,13 +267,13 @@ def next_tide_events_from_position(lat: float, lng: float, request: Request) -> 
         prev_station = session.exec(
             select(Station)
             .where(Station.interp < interp)
-            .order_by(Station.interp.desc())
+            .order_by(col(Station.interp).desc())
             .limit(1)
         ).one()
         next_station = session.exec(
             select(Station)
             .where(Station.interp > interp)
-            .order_by(Station.interp)
+            .order_by(col(Station.interp))
             .limit(1)
         ).one()
 
@@ -277,20 +295,21 @@ def next_tide_events_from_position(lat: float, lng: float, request: Request) -> 
     return first_tide_interp, second_tide_interp
 
 
-def initialize_db():
+def initialize_db() -> None:
     SQLModel.metadata.create_all(engine)
 
     with Session(engine) as session:
-        for name, station_id, lat, lon in ([
-            ["Richmond Lock", "0116", 51.46222, -0.31722],
-            ["Kew Bridge", "0115A", 51.486978, -0.287419],
-            ["Hammersmith Bridge", "0115", 51.462496, -0.316761],
-            ["Albert Bridge", "0114", 51.482364, -0.166756],
-            ["Chelsea Bridge", "0113A", 51.484548, -0.149784],
-            ["Tower Pier", "0113", 51.506684, -0.079555],
-            ["North Woolwich", "0112", 51.504687, 0.082693],
-            ["Erith", "0111B", 51.484911, 0.186495],
-        ]):
+        stations: list[tuple[str, str, float, float]] = ([
+            ("Richmond Lock", "0116", 51.46222, -0.31722),
+            ("Kew Bridge", "0115A", 51.486978, -0.287419),
+            ("Hammersmith Bridge", "0115", 51.462496, -0.316761),
+            ("Albert Bridge", "0114", 51.482364, -0.166756),
+            ("Chelsea Bridge", "0113A", 51.484548, -0.149784),
+            ("Tower Pier", "0113", 51.506684, -0.079555),
+            ("North Woolwich", "0112", 51.504687, 0.082693),
+            ("Erith", "0111B", 51.484911, 0.186495),
+        ])
+        for name, station_id, lat, lon in stations:
             interp = thames_path.line_locate_point(Point(lat, lon), normalized=True)
             station = Station(
                 name=name,
