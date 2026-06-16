@@ -43,7 +43,7 @@ def run_tests(service: str, type_: str, extra: list[str]):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run tests for tides app.")
     parser.add_argument("SERVICE", type=str, choices=("backend",))
-    parser.add_argument("TYPE", type=str, choices=("integration",))
+    parser.add_argument("TYPE", type=str, choices=("integration", "type_check"))
     parser.add_argument("EXTRA", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     extra = args.EXTRA

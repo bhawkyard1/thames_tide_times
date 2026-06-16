@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: backend
+      target: type_check
+    command: ${TEST_ARGS:-}
+    secrets: []
+    depends_on:
+      redis: !reset null
+      db: !reset null
+
+  frontend:
+    profiles:
+      - "ui"
+
+  nginx:
+    profiles:
+      - "ui"
+
+  redis:
+    profiles:
+      - "ui"
+
+  db:
+    profiles:
+      - "ui"
+
+secrets:
+  tidal_api_key: ~
+  postgres_pwd: ~

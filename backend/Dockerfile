@@ -10,5 +10,11 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements_test.txt
 COPY ./tests /code/tests
 ENTRYPOINT ["pytest", "/code/tests/"]
 
+FROM base AS type_check
+COPY ./requirements_type_check.txt /code/requirements_type_check.txt
+COPY ./mypy.ini /code/mypy.ini
+RUN pip install --no-cache-dir --upgrade -r /code/requirements_type_check.txt
+ENTRYPOINT ["mypy", "/code/"]
+
 FROM base AS production
 CMD ["fastapi", "run", "thames_tide_times/app.py", "--port", "80"]
